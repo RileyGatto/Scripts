@@ -1,61 +1,109 @@
-# Get-ADUsersMissingPhoneNumbers.ps1
-# Finds all enabled AD users who are:
-#   - Missing a Telephone Number (General tab) and/or Mobile Phone (Telephones tab)
-#   - Have the placeholder number 1300 176 077 in either field
-# Exports a CSV report for review and correction.
 
-#Requires -Module ActiveDirectory
+$CustomerServiceGroup  = 'Customer Service Officers'
+$CustomerServiceNumber = '1300 176 077'
+$PlaceholderNumbers = @(
+    '02 6962 8300',
+    '02 6962 8228',
+    '02 6962 8400'
+)
 
-$PlaceholderNumber = '1300 176 077'
-$ReportPath = "$PSScriptRoot\AD_Users_Missing_Phone_Numbers_$(Get-Date -Format 'yyyy-MM-dd_HHmm').csv"
+$ExcludedNames = @(
+    'Adroit Creations',
+    'Adroit Test',
+    'Advanced Comm User',
+    'auth',
+    'auth backup',
+    'BitTitan MigrationWiz',
+    'Building Inspection iPad',
+    'CBIS International',
+    'CIBIS User',
+    'City Strategy Temp Account 1',
+    'Civica',
+    'CM Services',
+    'CSO Tasks',
+    'Datascape API',
+    'Datascape Sync',
+    'Development Administration',
+    'Development Engineer iPad',
+    'Drainage Diagrams Officer',
+    'ePlanning Vetting',
+    'eservices'
+)
 
-Write-Host "Querying Active Directory for users with missing or placeholder phone numbers..." -ForegroundColor Cyan
+# Where Report is stored
+$ReportPath = "$PSScriptRoot\Reports\PhoneAudit_$(Get-Date -Format 'yyyy-MM-dd_HHmm').csv"
 
-$Users = Get-ADUser -Filter { Enabled -eq $true } `
-    -Properties DisplayName, SamAccountName, EmailAddress,
-                 telephoneNumber, mobile, Department, Title, DistinguishedName |
-    Where-Object {
-        [string]::IsNullOrWhiteSpace($_.telephoneNumber) -or
-        [string]::IsNullOrWhiteSpace($_.mobile)         -or
-        $_.telephoneNumber -eq $PlaceholderNumber        -or
-        $_.mobile          -eq $PlaceholderNumber
-    } |
-    Select-Object `
-        @{ N='Name';                    E={ $_.DisplayName } },
-        @{ N='Telephone (General Tab)'; E={ $_.telephoneNumber } },
-        @{ N='Mobile (Telephones Tab)'; E={ $_.mobile } },
-        @{ N='Issue';                   E={
-            $issues = @()
-            if ([string]::IsNullOrWhiteSpace($_.telephoneNumber))  { $issues += 'Missing Telephone' }
-            elseif ($_.telephoneNumber -eq $PlaceholderNumber)     { $issues += 'Placeholder Telephone (1300 176 077)' }
-            if ([string]::IsNullOrWhiteSpace($_.mobile))           { $issues += 'Missing Mobile' }
-            elseif ($_.mobile -eq $PlaceholderNumber)              { $issues += 'Placeholder Mobile (1300 176 077)' }
-            $issues -join ' | '
-        }}
-    Sort-Object Name
+# Import modules so you dont have to
+Import-Module ActiveDirectory       -ErrorAction Stop
+Import-Module Microsoft.Graph.Users -ErrorAction Stop
 
-if ($Users.Count -eq 0) {
-    Write-Host "All enabled users have valid phone numbers. No report generated." -ForegroundColor Green
-    exit
+# Used to get data from Entra
+Connect-MgGraph -Scopes 'User.Read.All' -NoWelcome -ErrorAction Stop
+
+# Customer Serivce Officers
+$CSSids = @{}
+Get-ADGroupMember -Identity $CustomerServiceGroup -Recursive |
+    Where-Object { $_.objectClass -eq 'user' } |
+    ForEach-Object { $CSSids[$_.SID.Value] = $true }
+
+# Issue colume value
+function Get-Issues ($tel, $mob, $isCS) {
+    $i = @()
+    if ($tel -eq $CustomerServiceNumber -and -not $isCS) { $i += 'Unauthorised 1300 (Telephone)' }
+    if ($mob -eq $CustomerServiceNumber -and -not $isCS) { $i += 'Unauthorised 1300 (Mobile)' }
+    foreach ($p in $PlaceholderNumbers) {
+        if ($tel -eq $p) { $i += "Placeholder Telephone ($tel)" }
+        if ($mob -eq $p) { $i += "Placeholder Mobile ($mob)" }
+    }
+    if ($tel -eq '' -and $mob -eq '') { $i += 'Missing both Telephone and Mobile' }
+    return $i
 }
 
-$Users | Export-Csv -Path $ReportPath -NoTypeInformation -Encoding UTF8
+$Results = @()
 
-Write-Host ""
-Write-Host "Done. $($Users.Count) user(s) found." -ForegroundColor Green
-Write-Host "Report saved to: $ReportPath" -ForegroundColor Yellow
-Write-Host ""
+# AD users
+Get-ADUser -Filter { Enabled -eq $true } -Properties DisplayName, Title, telephoneNumber, mobile, ObjectSID |
+Where-Object { $ExcludedNames -notcontains $_.DisplayName } |
+ForEach-Object {
+    $tel    = ([string]$_.telephoneNumber).Trim()
+    $mob    = ([string]$_.mobile).Trim()
+    $issues = Get-Issues $tel $mob $CSSids.ContainsKey($_.ObjectSID.Value)
+    if ($issues.Count -eq 0) { return }
+    $Results += [PSCustomObject]@{ Name = $_.DisplayName; Source = 'AD'; Title = $_.Title; Telephone = $tel; Mobile = $mob; Issue = $issues -join '; ' }
+}
 
-# Summary breakdown
-$MissingBoth        = ($Users | Where-Object { $_.'Issue' -like '*Missing Telephone*' -and $_.'Issue' -like '*Missing Mobile*' }).Count
-$MissingTelOnly     = ($Users | Where-Object { $_.'Issue' -eq 'Missing Telephone' }).Count
-$MissingMobOnly     = ($Users | Where-Object { $_.'Issue' -eq 'Missing Mobile' }).Count
-$PlaceholderTel     = ($Users | Where-Object { $_.'Issue' -like '*Placeholder Telephone*' }).Count
-$PlaceholderMob     = ($Users | Where-Object { $_.'Issue' -like '*Placeholder Mobile*' }).Count
+# Entra cloud-only users
+Get-MgUser -All -Filter 'accountEnabled eq true' -Property Id, DisplayName, JobTitle, BusinessPhones, MobilePhone, OnPremisesSyncEnabled |
+Where-Object { $_.OnPremisesSyncEnabled -ne $true -and $ExcludedNames -notcontains $_.DisplayName } |
+ForEach-Object {
+    $tel    = if ($_.BusinessPhones.Count -gt 0) { $_.BusinessPhones[0].Trim() } else { '' }
+    $mob    = ([string]$_.MobilePhone).Trim()
+    $issues = Get-Issues $tel $mob $false
+    if ($issues.Count -eq 0) { return }
+    $Results += [PSCustomObject]@{ Name = $_.DisplayName; Source = 'Entra'; Title = $_.JobTitle; Telephone = $tel; Mobile = $mob; Issue = $issues -join '; ' }
+}
 
-Write-Host "Summary:" -ForegroundColor Cyan
-Write-Host "  Missing both Telephone & Mobile     : $MissingBoth"
-Write-Host "  Missing Telephone only              : $MissingTelOnly"
-Write-Host "  Missing Mobile only                 : $MissingMobOnly"
-Write-Host "  Placeholder number in Telephone     : $PlaceholderTel"
-Write-Host "  Placeholder number in Mobile        : $PlaceholderMob"
+$Sorted = $Results |
+    Sort-Object @{
+        Expression = {
+            if ($_.Issue -like '*Unauthorised 1300*') { 1 }
+            elseif ($_.Issue -like '*Placeholder*')   { 2 }
+            else                                      { 3 }
+        }
+    }, Name |
+    Select-Object Name, Source, Title, Telephone, Mobile, Issue
+
+if ($Sorted.Count -eq 0) { Write-Host 'No issues found.' -ForegroundColor Green; exit }
+
+New-Item -ItemType Directory -Path "$PSScriptRoot\Reports" -Force | Out-Null
+$Sorted | Export-Csv -Path $ReportPath -NoTypeInformation -Encoding UTF8
+
+Write-Host "Report: $ReportPath" -ForegroundColor Yellow
+Write-Host ''
+Write-Host 'Summary:' -ForegroundColor Cyan
+Write-Host "  Total flagged          : $($Sorted.Count)"
+Write-Host "  AD users               : $(($Sorted | Where-Object { $_.Source -eq 'AD' }).Count)"
+Write-Host "  Entra cloud-only       : $(($Sorted | Where-Object { $_.Source -eq 'Entra' }).Count)"
+Write-Host "  Unauthorised 1300      : $(($Sorted | Where-Object { $_.Issue -like '*Unauthorised 1300*' }).Count)"
+Write-Host "  Placeholder number     : $(($Sorted | Where-Object { $_.Issue -like '*Placeholder*' }).Count)"
+Write-Host "  Missing Tel and Mobile : $(($Sorted | Where-Object { $_.Issue -like '*Missing both*' }).Count)"
