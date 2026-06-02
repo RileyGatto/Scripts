@@ -1,97 +1,86 @@
-
-$CustomerServiceGroup  = 'Customer Service Officers'
-$CustomerServiceNumber = '1300 176 077'
-$PlaceholderNumbers = @(
-    '02 6962 8300',
-    '02 6962 8228',
-    '02 6962 8400'
-)
-
-$ExcludedNames = @(
-    'Adroit Creations',
-    'Adroit Test',
-    'Advanced Comm User',
-    'auth',
-    'auth backup',
-    'BitTitan MigrationWiz',
-    'Building Inspection iPad',
-    'CBIS International',
-    'CIBIS User',
-    'City Strategy Temp Account 1',
-    'Civica',
-    'CM Services',
-    'CSO Tasks',
-    'Datascape API',
-    'Datascape Sync',
-    'Development Administration',
-    'Development Engineer iPad',
-    'Drainage Diagrams Officer',
-    'ePlanning Vetting',
-    'eservices'
-)
-
-# Where Report is stored
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+$CSGroup      = 'Customer Service Officers'
+$CS1300       = '1300 176 077'
+$Placeholders = @('02 6962 8300', '02 6962 8228', '02 6962 8400')
 $ReportPath = "$PSScriptRoot\Reports\PhoneAudit_$(Get-Date -Format 'yyyy-MM-dd_HHmm').csv"
+# =============================================================================
 
-# Import modules so you dont have to
 Import-Module ActiveDirectory       -ErrorAction Stop
 Import-Module Microsoft.Graph.Users -ErrorAction Stop
-
-# Used to get data from Entra
 Connect-MgGraph -Scopes 'User.Read.All' -NoWelcome -ErrorAction Stop
 
-# Customer Serivce Officers
+# Get Customer Service members from AD
 $CSSids = @{}
-Get-ADGroupMember -Identity $CustomerServiceGroup -Recursive |
+Get-ADGroupMember -Identity $CSGroup -Recursive |
     Where-Object { $_.objectClass -eq 'user' } |
     ForEach-Object { $CSSids[$_.SID.Value] = $true }
 
-# Issue colume value
-function Get-Issues ($tel, $mob, $isCS) {
-    $i = @()
-    if ($tel -eq $CustomerServiceNumber -and -not $isCS) { $i += 'Unauthorised 1300 (Telephone)' }
-    if ($mob -eq $CustomerServiceNumber -and -not $isCS) { $i += 'Unauthorised 1300 (Mobile)' }
-    foreach ($p in $PlaceholderNumbers) {
-        if ($tel -eq $p) { $i += "Placeholder Telephone ($tel)" }
-        if ($mob -eq $p) { $i += "Placeholder Mobile ($mob)" }
-    }
-    if ($tel -eq '' -and $mob -eq '') { $i += 'Missing both Telephone and Mobile' }
-    return $i
-}
-
 $Results = @()
 
-# AD users
+# --- AD users ---
 Get-ADUser -Filter { Enabled -eq $true } -Properties DisplayName, Title, telephoneNumber, mobile, ObjectSID |
-Where-Object { $ExcludedNames -notcontains $_.DisplayName } |
 ForEach-Object {
-    $tel    = ([string]$_.telephoneNumber).Trim()
-    $mob    = ([string]$_.mobile).Trim()
-    $issues = Get-Issues $tel $mob $CSSids.ContainsKey($_.ObjectSID.Value)
-    if ($issues.Count -eq 0) { return }
-    $Results += [PSCustomObject]@{ Name = $_.DisplayName; Source = 'AD'; Title = $_.Title; Telephone = $tel; Mobile = $mob; Issue = $issues -join '; ' }
+    $tel   = ([string]$_.telephoneNumber).Trim()
+    $mob   = ([string]$_.mobile).Trim()
+    $isCS  = $CSSids.ContainsKey($_.ObjectSID.Value)
+    $issue = @()
+
+    if ($tel -eq $CS1300 -and -not $isCS)  { $issue += 'Unauthorised 1300 (Telephone)' }
+    if ($mob -eq $CS1300 -and -not $isCS)  { $issue += 'Unauthorised 1300 (Mobile)' }
+    foreach ($p in $Placeholders) {
+        if ($tel -eq $p) { $issue += "Placeholder Telephone ($tel)" }
+        if ($mob -eq $p) { $issue += "Placeholder Mobile ($mob)" }
+    }
+    if ($tel -eq '' -and $mob -eq '') { $issue += 'Missing both Telephone and Mobile' }
+
+    if ($issue.Count -eq 0) { return }
+    $Results += [PSCustomObject]@{
+        Name      = $_.DisplayName
+        Source    = 'AD'
+        Title     = $_.Title
+        Telephone = $tel
+        Mobile    = $mob
+        Issue     = $issue -join '; '
+    }
 }
 
-# Entra cloud-only users
+# --- Entra cloud-only users ---
 Get-MgUser -All -Filter 'accountEnabled eq true' -Property Id, DisplayName, JobTitle, BusinessPhones, MobilePhone, OnPremisesSyncEnabled |
-Where-Object { $_.OnPremisesSyncEnabled -ne $true -and $ExcludedNames -notcontains $_.DisplayName } |
+Where-Object { $_.OnPremisesSyncEnabled -ne $true } |
 ForEach-Object {
-    $tel    = if ($_.BusinessPhones.Count -gt 0) { $_.BusinessPhones[0].Trim() } else { '' }
-    $mob    = ([string]$_.MobilePhone).Trim()
-    $issues = Get-Issues $tel $mob $false
-    if ($issues.Count -eq 0) { return }
-    $Results += [PSCustomObject]@{ Name = $_.DisplayName; Source = 'Entra'; Title = $_.JobTitle; Telephone = $tel; Mobile = $mob; Issue = $issues -join '; ' }
+    $tel   = if ($_.BusinessPhones.Count -gt 0) { $_.BusinessPhones[0].Trim() } else { '' }
+    $mob   = ([string]$_.MobilePhone).Trim()
+    $issue = @()
+
+    if ($tel -eq $CS1300)  { $issue += 'Unauthorised 1300 (Telephone)' }
+    if ($mob -eq $CS1300)  { $issue += 'Unauthorised 1300 (Mobile)' }
+    foreach ($p in $Placeholders) {
+        if ($tel -eq $p) { $issue += "Placeholder Telephone ($tel)" }
+        if ($mob -eq $p) { $issue += "Placeholder Mobile ($mob)" }
+    }
+    if ($tel -eq '' -and $mob -eq '') { $issue += 'Missing both Telephone and Mobile' }
+
+    if ($issue.Count -eq 0) { return }
+    $Results += [PSCustomObject]@{
+        Name      = $_.DisplayName
+        Source    = 'Entra'
+        Title     = $_.JobTitle
+        Telephone = $tel
+        Mobile    = $mob
+        Issue     = $issue -join '; '
+    }
 }
 
-$Sorted = $Results |
-    Sort-Object @{
-        Expression = {
-            if ($_.Issue -like '*Unauthorised 1300*') { 1 }
-            elseif ($_.Issue -like '*Placeholder*')   { 2 }
-            else                                      { 3 }
-        }
-    }, Name |
-    Select-Object Name, Source, Title, Telephone, Mobile, Issue
+# Sort: 1300 first, then placeholders, then missing
+$Sorted = $Results | Sort-Object @{
+    Expression = {
+        if ($_.Issue -like '*Unauthorised 1300*') { 1 }
+        elseif ($_.Issue -like '*Placeholder*')   { 2 }
+        else                                      { 3 }
+    }
+}, Name
 
 if ($Sorted.Count -eq 0) { Write-Host 'No issues found.' -ForegroundColor Green; exit }
 
