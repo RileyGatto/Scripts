@@ -3,7 +3,6 @@
 # =============================================================================
 $CSGroup      = 'Customer Service Officers'
 $CS1300       = '1300 176 077'
-$Placeholders = @('02 6962 8300', '02 6962 8228', '02 6962 8400')
 $ReportPath = "$PSScriptRoot\Reports\PhoneAudit_$(Get-Date -Format 'yyyy-MM-dd_HHmm').csv"
 # =============================================================================
 
@@ -29,10 +28,6 @@ ForEach-Object {
 
     if ($tel -eq $CS1300 -and -not $isCS)  { $issue += 'Unauthorised 1300 (Telephone)' }
     if ($mob -eq $CS1300 -and -not $isCS)  { $issue += 'Unauthorised 1300 (Mobile)' }
-    foreach ($p in $Placeholders) {
-        if ($tel -eq $p) { $issue += "Placeholder Telephone ($tel)" }
-        if ($mob -eq $p) { $issue += "Placeholder Mobile ($mob)" }
-    }
     if ($tel -eq '' -and $mob -eq '') { $issue += 'Missing both Telephone and Mobile' }
 
     if ($issue.Count -eq 0) { return }
@@ -56,10 +51,6 @@ ForEach-Object {
 
     if ($tel -eq $CS1300)  { $issue += 'Unauthorised 1300 (Telephone)' }
     if ($mob -eq $CS1300)  { $issue += 'Unauthorised 1300 (Mobile)' }
-    foreach ($p in $Placeholders) {
-        if ($tel -eq $p) { $issue += "Placeholder Telephone ($tel)" }
-        if ($mob -eq $p) { $issue += "Placeholder Mobile ($mob)" }
-    }
     if ($tel -eq '' -and $mob -eq '') { $issue += 'Missing both Telephone and Mobile' }
 
     if ($issue.Count -eq 0) { return }
@@ -73,12 +64,11 @@ ForEach-Object {
     }
 }
 
-# Sort: 1300 first, then placeholders, then missing
+# Sort: 1300 first, then missing
 $Sorted = $Results | Sort-Object @{
     Expression = {
         if ($_.Issue -like '*Unauthorised 1300*') { 1 }
-        elseif ($_.Issue -like '*Placeholder*')   { 2 }
-        else                                      { 3 }
+        else                                      { 2 }
     }
 }, Name
 
@@ -94,5 +84,4 @@ Write-Host "  Total flagged          : $($Sorted.Count)"
 Write-Host "  AD users               : $(($Sorted | Where-Object { $_.Source -eq 'AD' }).Count)"
 Write-Host "  Entra cloud-only       : $(($Sorted | Where-Object { $_.Source -eq 'Entra' }).Count)"
 Write-Host "  Unauthorised 1300      : $(($Sorted | Where-Object { $_.Issue -like '*Unauthorised 1300*' }).Count)"
-Write-Host "  Placeholder number     : $(($Sorted | Where-Object { $_.Issue -like '*Placeholder*' }).Count)"
 Write-Host "  Missing Tel and Mobile : $(($Sorted | Where-Object { $_.Issue -like '*Missing both*' }).Count)"
